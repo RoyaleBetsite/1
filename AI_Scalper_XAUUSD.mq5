@@ -690,6 +690,92 @@ string PreparePrompt()
 }
 
 //+------------------------------------------------------------------+
+//| JSON helpers                                                      |
+//+------------------------------------------------------------------+
+string EscapeJSONString(string text)
+{
+    string escaped = text;
+    StringReplace(escaped, "\\", "\\\\");
+    StringReplace(escaped, "\"", "\\\"");
+    StringReplace(escaped, "\r", "\\r");
+    StringReplace(escaped, "\n", "\\n");
+    StringReplace(escaped, "\t", "\\t");
+    return escaped;
+}
+
+string UnescapeJSONString(string text)
+{
+    string result = text;
+    StringReplace(result, "\\r", "");
+    StringReplace(result, "\\n", "\n");
+    StringReplace(result, "\\t", "\t");
+    StringReplace(result, "\\\"", "\"");
+    StringReplace(result, "\\/", "/");
+    StringReplace(result, "\\\\", "\\");
+    return result;
+}
+
+string ExtractNumericString(const string value, bool allowNegative)
+{
+    string cleaned = "";
+    int len = StringLen(value);
+    for(int i = 0; i < len; i++)
+    {
+        int ch = StringGetCharacter(value, i);
+        bool isDigit = (ch >= '0' && ch <= '9');
+        bool isDot = (ch == '.');
+        bool isMinus = (allowNegative && ch == '-' && StringLen(cleaned) == 0);
+        if(isDigit || isDot || isMinus)
+            cleaned += StringSubstr(value, i, 1);
+    }
+    return cleaned;
+}
+
+string ExtractKeyNumericValue(const string original, const string upperOriginal, const string key, bool allowNegative)
+{
+    string keyUpper = key;
+    StringToUpper(keyUpper);
+    string patterns[3];
+    patterns[0] = keyUpper + ":";
+    patterns[1] = keyUpper + "=";
+    patterns[2] = keyUpper;
+    int keyPos = -1;
+    int patternLen = 0;
+    for(int i = 0; i < 3 && keyPos == -1; i++)
+    {
+        keyPos = StringFind(upperOriginal, patterns[i]);
+        if(keyPos != -1)
+            patternLen = StringLen(patterns[i]);
+    }
+    if(keyPos == -1)
+        return "";
+
+    int valueStart = keyPos + patternLen;
+    while(valueStart < StringLen(original))
+    {
+        int ch = StringGetCharacter(original, valueStart);
+        if(ch == ' ' || ch == '\t' || ch == ':' || ch == '=')
+        {
+            valueStart++;
+            continue;
+        }
+        break;
+    }
+
+    int valueEnd = StringFind(original, "|", valueStart);
+    if(valueEnd == -1) valueEnd = StringLen(original);
+    int newlinePos = StringFind(original, "\n", valueStart);
+    if(newlinePos != -1 && newlinePos < valueEnd) valueEnd = newlinePos;
+    int carriagePos = StringFind(original, "\r", valueStart);
+    if(carriagePos != -1 && carriagePos < valueEnd) valueEnd = carriagePos;
+
+    string rawValue = StringSubstr(original, valueStart, valueEnd - valueStart);
+    StringTrimLeft(rawValue);
+    StringTrimRight(rawValue);
+    return ExtractNumericString(rawValue, allowNegative);
+}
+
+//+------------------------------------------------------------------+
 //| Get decisions from multiple AIs (updated to use selected models) |
 //+------------------------------------------------------------------+
 void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelList)
@@ -713,8 +799,15 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
         string model = models[i];
         StringTrimLeft(model);
         StringTrimRight(model);
+        if(StringLen(model) == 0)
+        {
+            PrintFormat("Model entry %d is empty, skipping", i);
+            continue;
+        }
         string decisionStr = GetAIDecision(prompt, model);
         ParseAIDecision(decisionStr, decisions[i]);
+        PrintFormat("AI Decision (%s): %s | %.1f%% | SL=%.5f | TP=%.5f",
+                   model, decisions[i].action, decisions[i].confidence * 100.0, decisions[i].slPrice, decisions[i].tpPrice);
     }
 }
 
@@ -724,87 +817,121 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 string GetAIDecision(string prompt, string modelName)
 {
     string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
-    string requestBody = "{"
-                        "\"model\": \"" + modelName + "\","
-                        "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
-                        "\"max_tokens\": 100,"
-                        "\"temperature\": 0.1"
-                        "}";
-    
-    char postData[], result[];
-    string resultHeaders;
-    
-    StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
-    
-    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, ArraySize(postData), result, resultHeaders);
-    
-    if(res != 200)
+    string safePrompt = EscapeJSONString(prompt);
+    string safeModel = EscapeJSONString(modelName);
+    string requestBody = StringFormat("{\"model\":\"%s\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],\"max_tokens\":100,\"temperature\":0.1}", safeModel, safePrompt);
+
+    uchar postData[];
+    uchar result[];
+    string resultHeaders = "";
+
+    int bodySize = StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+    if(bodySize <= 0)
     {
-        Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        Print("Failed to encode request body for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    string response = CharArrayToString(result);
+
+    int postSize = ArraySize(postData);
+    if(postSize > 0 && postData[postSize - 1] == 0)
+        ArrayResize(postData, postSize - 1);
+
+    ResetLastError();
+    int status = WebRequest("POST", openRouterURL, headers, 10000, postData, result, resultHeaders);
+
+    if(status == -1)
+    {
+        int err = GetLastError();
+        PrintFormat("WebRequest failed for %s. Error %d. Headers: %s", modelName, err, resultHeaders);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    if(status != 200)
+    {
+        string errorBody = (ArraySize(result) > 0) ? CharArrayToString(result, 0, ArraySize(result), CP_UTF8) : "";
+        PrintFormat("API call failed for %s: HTTP %d | Headers: %s | Body: %s", modelName, status, resultHeaders, errorBody);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    if(ArraySize(result) == 0)
+    {
+        Print("Empty response from OpenRouter for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    string response = CharArrayToString(result, 0, ArraySize(result), CP_UTF8);
+    if(StringLen(response) == 0)
+    {
+        Print("Empty response string for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
     Print("Full API Response for " + modelName + ": " + response); // Debug: Log full response
-    
-    // Improved JSON extraction: Handle potential escapes and find content more robustly
-    int contentStart = StringFind(response, "\"content\":");
-    if(contentStart == -1) 
+
+    int choicesPos = StringFind(response, "\"choices\"");
+    if(choicesPos == -1)
+    {
+        Print("No 'choices' array found in response for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    int contentKeyPos = StringFind(response, "\"content\"", choicesPos);
+    if(contentKeyPos == -1)
     {
         Print("No 'content' field found in response for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    // Skip to after ":"
-    contentStart = StringFind(response, "\"", contentStart + 9); // After "content":
-    if(contentStart == -1) 
+
+    int colonPos = StringFind(response, ":", contentKeyPos);
+    if(colonPos == -1)
     {
-        Print("'content' value start not found for " + modelName);
+        Print("No ':' after content key for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    contentStart++; // Skip the opening "
-    
-    // Find closing " , handling simple escapes (replace \" with temp marker if needed)
-    // For simplicity, find the next unescaped "
-    int contentEnd = contentStart;
-    while(true)
+
+    int quoteStart = StringFind(response, "\"", colonPos + 1);
+    if(quoteStart == -1)
     {
-        int nextQuote = StringFind(response, "\"", contentEnd);
-        if(nextQuote == -1) break;
-        
-        // Count backslashes before quote
-        int backslashCount = 0;
-        for(int j = nextQuote - 1; j >= contentStart && StringGetCharacter(response, j) == 92; j--)
-            backslashCount++;
-        
-        if(backslashCount % 2 == 0) // Even escapes = closing quote
+        Print("No opening quote for content value for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    int responseLen = StringLen(response);
+    int quoteEnd = quoteStart + 1;
+    bool foundClosing = false;
+    while(quoteEnd < responseLen)
+    {
+        int ch = StringGetCharacter(response, quoteEnd);
+        if(ch == '"' && !(quoteEnd > 0 && StringGetCharacter(response, quoteEnd - 1) == '\'))
         {
-            contentEnd = nextQuote;
+            foundClosing = true;
             break;
         }
-        else
-        {
-            contentEnd = nextQuote + 1;
-        }
+        quoteEnd++;
     }
-    
-    if(contentEnd <= contentStart)
+
+    if(!foundClosing)
     {
         Print("No closing quote for content in response for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    string aiResponse = StringSubstr(response, contentStart, contentEnd - contentStart);
-    // Unescape common: replace \n with actual newline if needed, but for parsing, keep as is
-    StringReplace(aiResponse, "\\n", "\n"); // Handle newlines if any
-    StringReplace(aiResponse, "\\r", "");   // Clean
+
+    string aiResponse = StringSubstr(response, quoteStart + 1, quoteEnd - quoteStart - 1);
+    aiResponse = UnescapeJSONString(aiResponse);
     StringTrimLeft(aiResponse);
     StringTrimRight(aiResponse);
-    
+
+    if(StringLen(aiResponse) == 0)
+    {
+        Print("Content field empty for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
     Print("Extracted AI Response for " + modelName + ": " + aiResponse); // Debug: Log extracted response
-    
+
     return aiResponse;
 }
+
 
 //+------------------------------------------------------------------+
 //| Parse AI decision string (robust parsing starting from keywords) |
@@ -815,115 +942,113 @@ void ParseAIDecision(string decStr, AI_Decision &dec)
     dec.confidence = 0.0;
     dec.slPrice = 0.0;
     dec.tpPrice = 0.0;
-    
+
     Print("Parsing raw decision string: " + decStr); // Debug: Log input to parser
-    
-    // Robust parsing: Find "ACTION:" and parse from there, ignoring prefix junk
-    int actionPos = StringFind(decStr, "ACTION:");
-    if(actionPos == -1) 
+
+    string trimmed = decStr;
+    StringTrimLeft(trimmed);
+    StringTrimRight(trimmed);
+    if(StringLen(trimmed) == 0)
     {
-        Print("No 'ACTION:' found in response");
+        Print("Decision string empty, defaulting to HOLD");
         return;
     }
-    
-    // Extract action after "ACTION:"
-    int pipePos = StringFind(decStr, "|", actionPos);
-    if(pipePos == -1) pipePos = StringLen(decStr);
-    string actionPart = StringSubstr(decStr, actionPos + 7, pipePos - actionPos - 7);
+
+    string upper = trimmed;
+    StringToUpper(upper);
+
+    int actionPos = StringFind(upper, "ACTION:");
+    int actionOffset = 7;
+    if(actionPos == -1)
+    {
+        actionPos = StringFind(upper, "ACTION=");
+        actionOffset = 7;
+    }
+    if(actionPos == -1)
+    {
+        actionPos = StringFind(upper, "ACTION");
+        actionOffset = 6;
+    }
+    if(actionPos == -1)
+    {
+        Print("No 'ACTION' found in response");
+        return;
+    }
+
+    int actionValueStart = actionPos + actionOffset;
+    while(actionValueStart < StringLen(trimmed))
+    {
+        int ch = StringGetCharacter(trimmed, actionValueStart);
+        if(ch == ' ' || ch == '\t' || ch == ':' || ch == '=')
+            actionValueStart++;
+        else
+            break;
+    }
+    int pipePos = StringFind(trimmed, "|", actionValueStart);
+    if(pipePos == -1) pipePos = StringLen(trimmed);
+    string actionPart = StringSubstr(trimmed, actionValueStart, pipePos - actionValueStart);
     StringTrimLeft(actionPart);
     StringTrimRight(actionPart);
-    StringToUpper(actionPart); // Normalize case
-    if(StringFind(actionPart, "BUY") >= 0) dec.action = "BUY";
-    else if(StringFind(actionPart, "SELL") >= 0) dec.action = "SELL";
-    else if(StringFind(actionPart, "HOLD") >= 0) dec.action = "HOLD";
-    
-    // CONFIDENCE: after first |
-    int confPos = StringFind(decStr, "CONFIDENCE:", pipePos);
+    string actionUpper = actionPart;
+    StringToUpper(actionUpper);
+    if(StringFind(actionUpper, "BUY") >= 0)
+        dec.action = "BUY";
+    else if(StringFind(actionUpper, "SELL") >= 0)
+        dec.action = "SELL";
+    else
+        dec.action = "HOLD";
+
+    int confPos = StringFind(upper, "CONFIDENCE:");
+    int confOffset = 11;
+    if(confPos == -1)
+    {
+        confPos = StringFind(upper, "CONFIDENCE=");
+        confOffset = 11;
+    }
+    if(confPos == -1)
+    {
+        confPos = StringFind(upper, "CONFIDENCE");
+        confOffset = 10;
+    }
     if(confPos != -1)
     {
-        int nextPipe = StringFind(decStr, "|", confPos);
-        if(nextPipe == -1) nextPipe = StringLen(decStr);
-        string confPart = StringSubstr(decStr, confPos + 10, nextPipe - confPos - 10);
-        StringTrimLeft(confPart);
-        StringTrimRight(confPart);
-        // Extract number after possible :
-        int colonPos = StringFind(confPart, ":");
-        if(colonPos >= 0) confPart = StringSubstr(confPart, colonPos + 1);
-        dec.confidence = MathMax(0.0, MathMin(1.0, StringToDouble(confPart))); // Clamp 0-1
-    }
-    
-// If BUY/SELL, parse SL and TP robustly
-if(dec.action != "HOLD" && dec.confidence > 0)
-{
-    // --- Parse Stop Loss (SL:)
-    int slPos = StringFind(decStr, "SL:");
-    if(slPos != -1)
-    {
-        // Extract substring after "SL:"
-        string slPart = StringSubstr(decStr, slPos + 3);
-        // Trim everything after next pipe '|' if exists
-        int pipeAfterSL = StringFind(slPart, "|");
-        if(pipeAfterSL != -1)
-            slPart = StringSubstr(slPart, 0, pipeAfterSL);
-
-        StringTrimLeft(slPart);
-        StringTrimRight(slPart);
-
-        // Remove any "SL:" prefix remnants or non-numeric chars
-        int colonPos = StringFind(slPart, ":");
-        if(colonPos >= 0)
-            slPart = StringSubstr(slPart, colonPos + 1);
-
-        // Keep only numeric + dot + minus
-        for(int c = 0; c < StringLen(slPart); c++)
+        int confStart = confPos + confOffset;
+        while(confStart < StringLen(trimmed))
         {
-            int ch = StringGetCharacter(slPart, c);
-            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
-                StringSetCharacter(slPart, c, ' ');
+            int ch = StringGetCharacter(trimmed, confStart);
+            if(ch == ' ' || ch == '\t' || ch == ':' || ch == '=')
+                confStart++;
+            else
+                break;
         }
-        StringTrimLeft(slPart);
-        StringTrimRight(slPart);
-
-        dec.slPrice = StringToDouble(slPart);
+        int confEnd = StringFind(trimmed, "|", confStart);
+        if(confEnd == -1) confEnd = StringLen(trimmed);
+        string confPart = StringSubstr(trimmed, confStart, confEnd - confStart);
+        confPart = ExtractNumericString(confPart, false);
+        if(StringLen(confPart) > 0)
+            dec.confidence = MathMax(0.0, MathMin(1.0, StringToDouble(confPart)));
     }
 
-    // --- Parse Take Profit (TP:)
-    int tpPos = StringFind(decStr, "TP:");
-    if(tpPos != -1)
+    if(dec.action != "HOLD" && dec.confidence > 0.0)
     {
-        string tpPart = StringSubstr(decStr, tpPos + 3);
-        int pipeAfterTP = StringFind(tpPart, "|");
-        if(pipeAfterTP != -1)
-            tpPart = StringSubstr(tpPart, 0, pipeAfterTP);
+        string slPart = ExtractKeyNumericValue(trimmed, upper, "SL", true);
+        if(StringLen(slPart) > 0)
+            dec.slPrice = StringToDouble(slPart);
 
-        StringTrimLeft(tpPart);
-        StringTrimRight(tpPart);
+        string tpPart = ExtractKeyNumericValue(trimmed, upper, "TP", true);
+        if(StringLen(tpPart) > 0)
+            dec.tpPrice = StringToDouble(tpPart);
 
-        int colonPos = StringFind(tpPart, ":");
-        if(colonPos >= 0)
-            tpPart = StringSubstr(tpPart, colonPos + 1);
-
-        // Clean numeric characters
-        for(int c = 0; c < StringLen(tpPart); c++)
-        {
-            int ch = StringGetCharacter(tpPart, c);
-            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
-                StringSetCharacter(tpPart, c, ' ');
-        }
-        StringTrimLeft(tpPart);
-        StringTrimRight(tpPart);
-
-        dec.tpPrice = StringToDouble(tpPart);
+        PrintFormat("Parsed AI SL/TP → SL: %.5f | TP: %.5f", dec.slPrice, dec.tpPrice);
     }
 
-    // --- Log parsed results
-    PrintFormat("Parsed AI SL/TP → SL: %.5f | TP: %.5f", dec.slPrice, dec.tpPrice);
+    PrintFormat("Parsed result - Action: %s | Confidence: %.2f | SL: %.5f | TP: %.5f",
+                dec.action,
+                dec.confidence,
+                dec.slPrice,
+                dec.tpPrice);
 }
 
-    
-    Print("Parsed result - Action: ", dec.action, " | Confidence: ", DoubleToString(dec.confidence, 2), 
-          " | SL: ", DoubleToString(dec.slPrice, 5), " | TP: ", DoubleToString(dec.tpPrice, 5)); // Debug: Log parsed values
-}
 
 //+------------------------------------------------------------------+
 //| Voting logic                                                     |
