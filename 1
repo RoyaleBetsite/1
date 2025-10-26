@@ -150,6 +150,8 @@ string OrderTypeToString(ENUM_ORDER_TYPE type)
 
 //--- Inputs
 input string    OpenRouterAPIKey = "";          // OpenRouter API Key
+input string    OpenRouterReferer = "https://your.site.or.app"; // Required Referer header for OpenRouter
+input string    OpenRouterAppName = "1minscalp EA";             // Sent as X-Title header
 
 // Model Selection
 input bool      UseFreeModels = true;           // Use Free Models (true) or Paid Models (false)
@@ -724,6 +726,10 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 string GetAIDecision(string prompt, string modelName)
 {
     string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
+    if(StringLen(OpenRouterReferer) > 0)
+        headers += "HTTP-Referer: " + OpenRouterReferer + "\r\n";
+    if(StringLen(OpenRouterAppName) > 0)
+        headers += "X-Title: " + OpenRouterAppName + "\r\n";
     string requestBody = "{"
                         "\"model\": \"" + modelName + "\","
                         "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
@@ -741,6 +747,8 @@ string GetAIDecision(string prompt, string modelName)
     if(res != 200)
     {
         Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        if(res == 401 || res == 403)
+            Print("OpenRouter returned an authorization error. Verify your API key and update the OpenRouterReferer/OpenRouterAppName inputs to match your registered site or app.");
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
     
