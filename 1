@@ -382,7 +382,8 @@ void ManagePositions()
    if(pipSize <= 0)
       pipSize = _Point;
 
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
+    int totalPositions = PositionsTotal();
+    for(int i = totalPositions - 1; i >= 0; i--)
    {
       if(!PositionSelectByIndex(i))
          continue;
@@ -525,7 +526,8 @@ double CalculatePipSize()
 //+------------------------------------------------------------------+
 bool HasOpenPositionOnSymbol()
 {
-   for(int i = 0; i < PositionsTotal(); ++i)
+    int totalPositions = PositionsTotal();
+    for(int i = 0; i < totalPositions; i++)
    {
       if(!PositionSelectByIndex(i))
          continue;
@@ -541,7 +543,6 @@ bool HasOpenPositionOnSymbol()
 ENUM_TREND_MODE GetTrend()
 {
    double maBuffer[2];
-   ArraySetAsSeries(maBuffer, true);
    if(CopyBuffer(maHandle, 0, 0, 2, maBuffer) != 2)
       return TREND_SIDEWAYS;
 
@@ -586,9 +587,6 @@ bool IsVolatilityOK()
       return false;
 
    double bbUpper[1], bbLower[1], bbMiddle[1];
-   ArraySetAsSeries(bbUpper, true);
-   ArraySetAsSeries(bbLower, true);
-   ArraySetAsSeries(bbMiddle, true);
 
    if(CopyBuffer(bbHandle, 1, 0, 1, bbUpper) != 1 ||
       CopyBuffer(bbHandle, 2, 0, 1, bbLower) != 1 ||
