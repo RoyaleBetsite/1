@@ -206,6 +206,41 @@ datetime lastBarTime = 0;
 int atrHandle, bbHandle, maHandle;
 double atrBuffer[];
 string openRouterURL = "https://openrouter.ai/api/v1/chat/completions";
+
+//+------------------------------------------------------------------+
+//| Escape special characters for JSON payloads                      |
+//+------------------------------------------------------------------+
+string EscapeJson(const string text)
+{
+    string escaped = "";
+    int len = StringLen(text);
+    for(int i = 0; i < len; i++)
+    {
+        int ch = StringGetCharacter(text, i);
+        switch(ch)
+        {
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped += StringSubstr(text, i, 1);
+                break;
+        }
+    }
+    return escaped;
+}
 double spreadHistory[100];
 int spreadIndex = 0;
 string lastAdvice = "HOLD";  // For dashboard
@@ -228,7 +263,7 @@ int OnInit()
         Alert("Please enter a valid OpenRouter API key!");
         return(INIT_FAILED);
     }
-    
+
     if(NumAIs < 1 || NumAIs > 5)
     {
         Alert("NumAIs must be 1-5!");
@@ -713,6 +748,8 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
         string model = models[i];
         StringTrimLeft(model);
         StringTrimRight(model);
+        if(StringLen(model) == 0)
+            model = "openrouter/auto";
         string decisionStr = GetAIDecision(prompt, model);
         ParseAIDecision(decisionStr, decisions[i]);
     }
@@ -721,91 +758,161 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 //+------------------------------------------------------------------+
 //| Single AI decision                                               |
 //+------------------------------------------------------------------+
+int ExtractHttpStatusCode(const string headers)
+{
+    if(StringLen(headers) == 0)
+        return 0;
+
+    int lineEnd = StringFind(headers, "\r\n");
+    string statusLine = (lineEnd == -1) ? headers : StringSubstr(headers, 0, lineEnd);
+
+    int firstSpace = StringFind(statusLine, " ");
+    if(firstSpace == -1)
+        return 0;
+
+    int secondSpace = StringFind(statusLine, " ", firstSpace + 1);
+    string codeStr;
+    if(secondSpace == -1)
+        codeStr = StringSubstr(statusLine, firstSpace + 1);
+    else
+        codeStr = StringSubstr(statusLine, firstSpace + 1, secondSpace - firstSpace - 1);
+
+    StringTrimLeft(codeStr);
+    StringTrimRight(codeStr);
+
+    if(StringLen(codeStr) == 0)
+        return 0;
+
+    return (int)StringToInteger(codeStr);
+}
+
 string GetAIDecision(string prompt, string modelName)
 {
-    string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
-    string requestBody = "{"
-                        "\"model\": \"" + modelName + "\","
-                        "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
-                        "\"max_tokens\": 100,"
-                        "\"temperature\": 0.1"
-                        "}";
-    
-    char postData[], result[];
-    string resultHeaders;
-    
-    StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
-    
-    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, ArraySize(postData), result, resultHeaders);
-    
-    if(res != 200)
+    if(StringLen(OpenRouterAPIKey) == 0)
     {
-        Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        Print("OpenRouter API key is not configured.");
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    string response = CharArrayToString(result);
-    Print("Full API Response for " + modelName + ": " + response); // Debug: Log full response
-    
-    // Improved JSON extraction: Handle potential escapes and find content more robustly
+
+    string requestHeaders =
+        "Content-Type: application/json\r\n" +
+        "Authorization: Bearer " + OpenRouterAPIKey + "\r\n" +
+        "X-Title: AI_Scalper_XAUUSD\r\n";
+
+    string escapedPrompt = EscapeJson(prompt);
+    string requestBody = "{";
+    requestBody += "\"model\":\"" + modelName + "\",";
+    requestBody += "\"messages\":[";
+    requestBody += "{\"role\":\"system\",\"content\":\"You are an AI trading assistant.\"},";
+    requestBody += "{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}";
+    requestBody += "],";
+    requestBody += "\"temperature\":0.2";
+    requestBody += "}";
+
+    uchar body[];
+    int bodySize = StringToCharArray(requestBody, body, 0, WHOLE_ARRAY, CP_UTF8);
+    if(bodySize > 0)
+    {
+        bodySize--;
+        ArrayResize(body, bodySize);
+    }
+
+    uchar result[];
+    string responseHeaders = "";
+
+    ResetLastError();
+    int responseSize = WebRequest(
+        "POST",
+        openRouterURL,
+        requestHeaders,
+        5000,
+        body,
+        result,
+        responseHeaders
+    );
+
+    if(responseSize == -1)
+    {
+        int errCode = GetLastError();
+        PrintFormat("OpenRouter request error (%s): %d %s", modelName, errCode, ErrorDescription(errCode));
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    string response = (responseSize > 0) ? CharArrayToString(result, 0, responseSize, CP_UTF8) : "";
+
+    int statusCode = ExtractHttpStatusCode(responseHeaders);
+    if(statusCode == 0)
+    {
+        PrintFormat("OpenRouter response for %s missing HTTP status. Headers: %s", modelName, responseHeaders);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    if(statusCode != 200)
+    {
+        PrintFormat("OpenRouter HTTP %d for %s: %s", statusCode, modelName, response);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    if(StringLen(response) == 0)
+    {
+        Print("Empty response received from OpenRouter for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    Print("Full API Response for " + modelName + ": " + response);
+
     int contentStart = StringFind(response, "\"content\":");
-    if(contentStart == -1) 
+    if(contentStart == -1)
     {
         Print("No 'content' field found in response for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    // Skip to after ":"
-    contentStart = StringFind(response, "\"", contentStart + 9); // After "content":
-    if(contentStart == -1) 
+
+    contentStart = StringFind(response, "\"", contentStart + 9);
+    if(contentStart == -1)
     {
         Print("'content' value start not found for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    contentStart++; // Skip the opening "
-    
-    // Find closing " , handling simple escapes (replace \" with temp marker if needed)
-    // For simplicity, find the next unescaped "
+    contentStart++;
+
     int contentEnd = contentStart;
     while(true)
     {
         int nextQuote = StringFind(response, "\"", contentEnd);
-        if(nextQuote == -1) break;
-        
-        // Count backslashes before quote
+        if(nextQuote == -1)
+            break;
+
         int backslashCount = 0;
         for(int j = nextQuote - 1; j >= contentStart && StringGetCharacter(response, j) == 92; j--)
             backslashCount++;
-        
-        if(backslashCount % 2 == 0) // Even escapes = closing quote
+
+        if((backslashCount % 2) == 0)
         {
             contentEnd = nextQuote;
             break;
         }
-        else
-        {
-            contentEnd = nextQuote + 1;
-        }
+        contentEnd = nextQuote + 1;
     }
-    
+
     if(contentEnd <= contentStart)
     {
         Print("No closing quote for content in response for " + modelName);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
+
     string aiResponse = StringSubstr(response, contentStart, contentEnd - contentStart);
-    // Unescape common: replace \n with actual newline if needed, but for parsing, keep as is
-    StringReplace(aiResponse, "\\n", "\n"); // Handle newlines if any
-    StringReplace(aiResponse, "\\r", "");   // Clean
+    StringReplace(aiResponse, "\\\"", "\"");
+    StringReplace(aiResponse, "\\\\", "\\");
+    StringReplace(aiResponse, "\\n", "\n");
+    StringReplace(aiResponse, "\\r", "");
     StringTrimLeft(aiResponse);
     StringTrimRight(aiResponse);
-    
-    Print("Extracted AI Response for " + modelName + ": " + aiResponse); // Debug: Log extracted response
-    
+
+    Print("Extracted AI Response for " + modelName + ": " + aiResponse);
+
     return aiResponse;
 }
-
 //+------------------------------------------------------------------+
 //| Parse AI decision string (robust parsing starting from keywords) |
 //+------------------------------------------------------------------+
@@ -815,166 +922,173 @@ void ParseAIDecision(string decStr, AI_Decision &dec)
     dec.confidence = 0.0;
     dec.slPrice = 0.0;
     dec.tpPrice = 0.0;
-    
-    Print("Parsing raw decision string: " + decStr); // Debug: Log input to parser
-    
-    // Robust parsing: Find "ACTION:" and parse from there, ignoring prefix junk
+
+    Print("Parsing raw decision string: " + decStr);
+
     int actionPos = StringFind(decStr, "ACTION:");
-    if(actionPos == -1) 
+    if(actionPos == -1)
     {
         Print("No 'ACTION:' found in response");
         return;
     }
-    
-    // Extract action after "ACTION:"
+
     int pipePos = StringFind(decStr, "|", actionPos);
-    if(pipePos == -1) pipePos = StringLen(decStr);
+    if(pipePos == -1)
+        pipePos = StringLen(decStr);
+
     string actionPart = StringSubstr(decStr, actionPos + 7, pipePos - actionPos - 7);
     StringTrimLeft(actionPart);
     StringTrimRight(actionPart);
-    StringToUpper(actionPart); // Normalize case
-    if(StringFind(actionPart, "BUY") >= 0) dec.action = "BUY";
-    else if(StringFind(actionPart, "SELL") >= 0) dec.action = "SELL";
-    else if(StringFind(actionPart, "HOLD") >= 0) dec.action = "HOLD";
-    
-    // CONFIDENCE: after first |
+    StringToUpper(actionPart);
+
+    if(StringFind(actionPart, "BUY") >= 0)
+        dec.action = "BUY";
+    else if(StringFind(actionPart, "SELL") >= 0)
+        dec.action = "SELL";
+    else if(StringFind(actionPart, "HOLD") >= 0)
+        dec.action = "HOLD";
+
     int confPos = StringFind(decStr, "CONFIDENCE:", pipePos);
     if(confPos != -1)
     {
         int nextPipe = StringFind(decStr, "|", confPos);
-        if(nextPipe == -1) nextPipe = StringLen(decStr);
+        if(nextPipe == -1)
+            nextPipe = StringLen(decStr);
+
         string confPart = StringSubstr(decStr, confPos + 10, nextPipe - confPos - 10);
         StringTrimLeft(confPart);
         StringTrimRight(confPart);
-        // Extract number after possible :
+
         int colonPos = StringFind(confPart, ":");
-        if(colonPos >= 0) confPart = StringSubstr(confPart, colonPos + 1);
-        dec.confidence = MathMax(0.0, MathMin(1.0, StringToDouble(confPart))); // Clamp 0-1
-    }
-    
-// If BUY/SELL, parse SL and TP robustly
-if(dec.action != "HOLD" && dec.confidence > 0)
-{
-    // --- Parse Stop Loss (SL:)
-    int slPos = StringFind(decStr, "SL:");
-    if(slPos != -1)
-    {
-        // Extract substring after "SL:"
-        string slPart = StringSubstr(decStr, slPos + 3);
-        // Trim everything after next pipe '|' if exists
-        int pipeAfterSL = StringFind(slPart, "|");
-        if(pipeAfterSL != -1)
-            slPart = StringSubstr(slPart, 0, pipeAfterSL);
-
-        StringTrimLeft(slPart);
-        StringTrimRight(slPart);
-
-        // Remove any "SL:" prefix remnants or non-numeric chars
-        int colonPos = StringFind(slPart, ":");
         if(colonPos >= 0)
-            slPart = StringSubstr(slPart, colonPos + 1);
+            confPart = StringSubstr(confPart, colonPos + 1);
 
-        // Keep only numeric + dot + minus
-        for(int c = 0; c < StringLen(slPart); c++)
-        {
-            int ch = StringGetCharacter(slPart, c);
-            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
-                StringSetCharacter(slPart, c, ' ');
-        }
-        StringTrimLeft(slPart);
-        StringTrimRight(slPart);
-
-        dec.slPrice = StringToDouble(slPart);
+        dec.confidence = MathMax(0.0, MathMin(1.0, StringToDouble(confPart)));
     }
 
-    // --- Parse Take Profit (TP:)
-    int tpPos = StringFind(decStr, "TP:");
-    if(tpPos != -1)
+    if(dec.action != "HOLD" && dec.confidence > 0.0)
     {
-        string tpPart = StringSubstr(decStr, tpPos + 3);
-        int pipeAfterTP = StringFind(tpPart, "|");
-        if(pipeAfterTP != -1)
-            tpPart = StringSubstr(tpPart, 0, pipeAfterTP);
-
-        StringTrimLeft(tpPart);
-        StringTrimRight(tpPart);
-
-        int colonPos = StringFind(tpPart, ":");
-        if(colonPos >= 0)
-            tpPart = StringSubstr(tpPart, colonPos + 1);
-
-        // Clean numeric characters
-        for(int c = 0; c < StringLen(tpPart); c++)
+        int slPos = StringFind(decStr, "SL:");
+        if(slPos != -1)
         {
-            int ch = StringGetCharacter(tpPart, c);
-            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
-                StringSetCharacter(tpPart, c, ' ');
-        }
-        StringTrimLeft(tpPart);
-        StringTrimRight(tpPart);
+            string slPart = StringSubstr(decStr, slPos + 3);
+            int pipeAfterSL = StringFind(slPart, "|");
+            if(pipeAfterSL != -1)
+                slPart = StringSubstr(slPart, 0, pipeAfterSL);
 
-        dec.tpPrice = StringToDouble(tpPart);
+            StringTrimLeft(slPart);
+            StringTrimRight(slPart);
+
+            int colonPos = StringFind(slPart, ":");
+            if(colonPos >= 0)
+                slPart = StringSubstr(slPart, colonPos + 1);
+
+            for(int c = 0; c < StringLen(slPart); c++)
+            {
+                int ch = StringGetCharacter(slPart, c);
+                if(!((ch >= '0' && ch <= '9') || ch == '.' || ch == '-'))
+                    StringSetCharacter(slPart, c, ' ');
+            }
+            StringTrimLeft(slPart);
+            StringTrimRight(slPart);
+
+            dec.slPrice = StringToDouble(slPart);
+        }
+
+        int tpPos = StringFind(decStr, "TP:");
+        if(tpPos != -1)
+        {
+            string tpPart = StringSubstr(decStr, tpPos + 3);
+            int pipeAfterTP = StringFind(tpPart, "|");
+            if(pipeAfterTP != -1)
+                tpPart = StringSubstr(tpPart, 0, pipeAfterTP);
+
+            StringTrimLeft(tpPart);
+            StringTrimRight(tpPart);
+
+            int colonPos = StringFind(tpPart, ":");
+            if(colonPos >= 0)
+                tpPart = StringSubstr(tpPart, colonPos + 1);
+
+            for(int c = 0; c < StringLen(tpPart); c++)
+            {
+                int ch = StringGetCharacter(tpPart, c);
+                if(!((ch >= '0' && ch <= '9') || ch == '.' || ch == '-'))
+                    StringSetCharacter(tpPart, c, ' ');
+            }
+            StringTrimLeft(tpPart);
+            StringTrimRight(tpPart);
+
+            dec.tpPrice = StringToDouble(tpPart);
+        }
+
+        PrintFormat("Parsed AI SL/TP → SL: %.5f | TP: %.5f", dec.slPrice, dec.tpPrice);
     }
 
-    // --- Log parsed results
-    PrintFormat("Parsed AI SL/TP → SL: %.5f | TP: %.5f", dec.slPrice, dec.tpPrice);
+    Print("Parsed result - Action: ", dec.action, " | Confidence: ", DoubleToString(dec.confidence, 2),
+          " | SL: ", DoubleToString(dec.slPrice, 5), " | TP: ", DoubleToString(dec.tpPrice, 5));
 }
-
-    
-    Print("Parsed result - Action: ", dec.action, " | Confidence: ", DoubleToString(dec.confidence, 2), 
-          " | SL: ", DoubleToString(dec.slPrice, 5), " | TP: ", DoubleToString(dec.tpPrice, 5)); // Debug: Log parsed values
-}
-
 //+------------------------------------------------------------------+
 //| Voting logic                                                     |
 //+------------------------------------------------------------------+
 string VoteDecisions(AI_Decision &decisions[])
 {
     int total = ArraySize(decisions);
-    if(total == 0) return "HOLD";
-    
-    int buyCount = 0, sellCount = 0;
-    double avgConf = 0.0;
-    
+    if(total == 0)
+        return "HOLD";
+
+    int buyCount = 0;
+    int sellCount = 0;
+    double confidenceSum = 0.0;
+
     for(int i = 0; i < total; i++)
     {
-        if(decisions[i].action == "BUY") buyCount++;
-        else if(decisions[i].action == "SELL") sellCount++;
-        avgConf += decisions[i].confidence;
+        if(decisions[i].action == "BUY")
+            buyCount++;
+        else if(decisions[i].action == "SELL")
+            sellCount++;
+
+        confidenceSum += decisions[i].confidence;
     }
-    avgConf /= total;
-    
-    Print("AI Votes - Buy: ", buyCount, " Sell: ", sellCount, " Avg Conf: ", DoubleToString(avgConf * 100, 1), "%");
-    Print("Minimum required confidence: ", DoubleToString(MinConfidence * 100, 0), "%");
-    if(avgConf < MinConfidence) 
-    {
-        Print("Avg Confidence: ", DoubleToString(avgConf * 100, 1), "% < ", DoubleToString(MinConfidence * 100, 0), "%, forcing HOLD");
-        return "HOLD";
-    }
-    
+
+    double avgConf = confidenceSum / total;
     double buyPct = (double)buyCount / total;
     double sellPct = (double)sellCount / total;
-    
+
+    PrintFormat("AI Votes – Buy: %.2f | Sell: %.2f | Avg Confidence: %.0f%%", buyPct, sellPct, avgConf * 100.0);
+    PrintFormat("Minimum required confidence: %.0f%%", MinConfidence * 100.0);
+
+    if(avgConf < MinConfidence)
+    {
+        PrintFormat("Avg Confidence %.1f%% below threshold %.0f%% — forcing HOLD", avgConf * 100.0, MinConfidence * 100.0);
+        return "HOLD";
+    }
+
     switch(VoteMode)
     {
         case VOTE_MAJORITY:
-            if(buyPct > sellPct && buyPct > 0.5) return "BUY";
-            if(sellPct > buyPct && sellPct > 0.5) return "SELL";
+            if(buyPct > sellPct && buyPct > 0.5)
+                return "BUY";
+            if(sellPct > buyPct && sellPct > 0.5)
+                return "SELL";
             break;
         case VOTE_UNANIMOUS:
-            if(buyCount == total) return "BUY";
-            if(sellCount == total) return "SELL";
+            if(buyCount == total)
+                return "BUY";
+            if(sellCount == total)
+                return "SELL";
             break;
         case VOTE_THRESHOLD:
-            if(buyPct >= VoteThreshold) return "BUY";
-            if(sellPct >= VoteThreshold) return "SELL";
+            if(buyPct >= VoteThreshold)
+                return "BUY";
+            if(sellPct >= VoteThreshold)
+                return "SELL";
             break;
     }
-    
+
     Print("No clear majority/unanimous/threshold met, HOLD");
     return "HOLD";
 }
-
 //+------------------------------------------------------------------+
 //| Calculate adaptive SL/TP (updated for AI absolute prices)        |
 //+------------------------------------------------------------------+
