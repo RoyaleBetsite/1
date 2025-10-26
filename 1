@@ -758,6 +758,34 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 //+------------------------------------------------------------------+
 //| Single AI decision                                               |
 //+------------------------------------------------------------------+
+int ExtractHttpStatusCode(const string headers)
+{
+    if(StringLen(headers) == 0)
+        return 0;
+
+    int lineEnd = StringFind(headers, "\r\n");
+    string statusLine = (lineEnd == -1) ? headers : StringSubstr(headers, 0, lineEnd);
+
+    int firstSpace = StringFind(statusLine, " ");
+    if(firstSpace == -1)
+        return 0;
+
+    int secondSpace = StringFind(statusLine, " ", firstSpace + 1);
+    string codeStr;
+    if(secondSpace == -1)
+        codeStr = StringSubstr(statusLine, firstSpace + 1);
+    else
+        codeStr = StringSubstr(statusLine, firstSpace + 1, secondSpace - firstSpace - 1);
+
+    StringTrimLeft(codeStr);
+    StringTrimRight(codeStr);
+
+    if(StringLen(codeStr) == 0)
+        return 0;
+
+    return (int)StringToInteger(codeStr);
+}
+
 string GetAIDecision(string prompt, string modelName)
 {
     if(StringLen(OpenRouterAPIKey) == 0)
@@ -767,6 +795,7 @@ string GetAIDecision(string prompt, string modelName)
     }
 
     string requestHeaders =
+        "Content-Type: application/json\r\n" +
         "Authorization: Bearer " + OpenRouterAPIKey + "\r\n" +
         "X-Title: AI_Scalper_XAUUSD\r\n";
 
@@ -780,7 +809,7 @@ string GetAIDecision(string prompt, string modelName)
     requestBody += "\"temperature\":0.2";
     requestBody += "}";
 
-    char body[];
+    uchar body[];
     int bodySize = StringToCharArray(requestBody, body, 0, WHOLE_ARRAY, CP_UTF8);
     if(bodySize > 0)
     {
@@ -788,31 +817,39 @@ string GetAIDecision(string prompt, string modelName)
         ArrayResize(body, bodySize);
     }
 
-    char result[];
-    ArrayResize(result, 0);
+    uchar result[];
+    string responseHeaders = "";
 
-    int res = WebRequest(
+    ResetLastError();
+    int responseSize = WebRequest(
         "POST",
         openRouterURL,
-        "application/json",
-        "",
-        0,
+        requestHeaders,
+        5000,
         body,
         result,
-        requestHeaders
+        responseHeaders
     );
 
-    string response = CharArrayToString(result, 0, ArraySize(result), CP_UTF8);
-
-    if(res == -1)
+    if(responseSize == -1)
     {
-        PrintFormat("OpenRouter request error (%s): %s", modelName, ErrorDescription(GetLastError()));
+        int errCode = GetLastError();
+        PrintFormat("OpenRouter request error (%s): %d %s", modelName, errCode, ErrorDescription(errCode));
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
 
-    if(res != 200)
+    string response = (responseSize > 0) ? CharArrayToString(result, 0, responseSize, CP_UTF8) : "";
+
+    int statusCode = ExtractHttpStatusCode(responseHeaders);
+    if(statusCode == 0)
     {
-        PrintFormat("OpenRouter HTTP %d for %s: %s", res, modelName, response);
+        PrintFormat("OpenRouter response for %s missing HTTP status. Headers: %s", modelName, responseHeaders);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    if(statusCode != 200)
+    {
+        PrintFormat("OpenRouter HTTP %d for %s: %s", statusCode, modelName, response);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
 
