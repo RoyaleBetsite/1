@@ -150,6 +150,8 @@ string OrderTypeToString(ENUM_ORDER_TYPE type)
 
 //--- Inputs
 input string    OpenRouterAPIKey = "";          // OpenRouter API Key
+input string    OpenRouterReferer = "";         // Your verified site URL (for OpenRouter)
+input string    OpenRouterAppName = "";         // App name registered with OpenRouter
 
 // Model Selection
 input bool      UseFreeModels = true;           // Use Free Models (true) or Paid Models (false)
@@ -226,6 +228,12 @@ int OnInit()
     if(StringLen(OpenRouterAPIKey) < 10)
     {
         Alert("Please enter a valid OpenRouter API key!");
+        return(INIT_FAILED);
+    }
+
+    if(StringLen(OpenRouterReferer) == 0 || StringLen(OpenRouterAppName) == 0)
+    {
+        Alert("Please set both OpenRouterReferer and OpenRouterAppName inputs to match your registered site/app.");
         return(INIT_FAILED);
     }
     
@@ -724,6 +732,16 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 string GetAIDecision(string prompt, string modelName)
 {
     string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
+    if(StringLen(OpenRouterReferer) > 0)
+    {
+        headers += "HTTP-Referer: " + OpenRouterReferer + "\r\n";
+        headers += "OpenRouter-Referer: " + OpenRouterReferer + "\r\n";
+    }
+    if(StringLen(OpenRouterAppName) > 0)
+    {
+        headers += "X-Title: " + OpenRouterAppName + "\r\n";
+        headers += "OpenRouter-App: " + OpenRouterAppName + "\r\n";
+    }
     string requestBody = "{"
                         "\"model\": \"" + modelName + "\","
                         "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
@@ -740,7 +758,18 @@ string GetAIDecision(string prompt, string modelName)
     
     if(res != 200)
     {
-        Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        if(res == 401 || res == 403)
+        {
+            string authMsg = "OpenRouter returned an authorization error. Verify your API key and update the OpenRouterReferer/OpenRouterAppName inputs to match your registered site or app.";
+            Print(authMsg + " (HTTP " + IntegerToString(res) + ")");
+            if(StringLen(resultHeaders) > 0)
+                Print("Response headers: " + resultHeaders);
+            Alert(authMsg);
+        }
+        else
+        {
+            Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        }
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
     
