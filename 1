@@ -150,8 +150,6 @@ string OrderTypeToString(ENUM_ORDER_TYPE type)
 
 //--- Inputs
 input string    OpenRouterAPIKey = "";          // OpenRouter API Key
-input string    OpenRouterReferer = "";         // Your verified site URL (for OpenRouter)
-input string    OpenRouterAppName = "";         // App name registered with OpenRouter
 
 // Model Selection
 input bool      UseFreeModels = true;           // Use Free Models (true) or Paid Models (false)
@@ -231,12 +229,6 @@ int OnInit()
         return(INIT_FAILED);
     }
 
-    if(StringLen(OpenRouterReferer) == 0 || StringLen(OpenRouterAppName) == 0)
-    {
-        Alert("Please set both OpenRouterReferer and OpenRouterAppName inputs to match your registered site/app.");
-        return(INIT_FAILED);
-    }
-    
     if(NumAIs < 1 || NumAIs > 5)
     {
         Alert("NumAIs must be 1-5!");
@@ -731,17 +723,9 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 //+------------------------------------------------------------------+
 string GetAIDecision(string prompt, string modelName)
 {
-    string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
-    if(StringLen(OpenRouterReferer) > 0)
-    {
-        headers += "HTTP-Referer: " + OpenRouterReferer + "\r\n";
-        headers += "OpenRouter-Referer: " + OpenRouterReferer + "\r\n";
-    }
-    if(StringLen(OpenRouterAppName) > 0)
-    {
-        headers += "X-Title: " + OpenRouterAppName + "\r\n";
-        headers += "OpenRouter-App: " + OpenRouterAppName + "\r\n";
-    }
+    string headers = "Content-Type: application/json\r\n";
+    headers += "Authorization: Bearer " + OpenRouterAPIKey + "\r\n";
+    headers += "X-Title: AI_Scalper_XAUUSD\r\n";
     string requestBody = "{"
                         "\"model\": \"" + modelName + "\","
                         "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
@@ -749,31 +733,34 @@ string GetAIDecision(string prompt, string modelName)
                         "\"temperature\": 0.1"
                         "}";
     
-    char postData[], result[];
+    char postData[];
+    int postSize = StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+    if(postSize > 0)
+    {
+        postSize--; // Exclude terminating null byte from payload
+        ArrayResize(postData, postSize);
+    }
+
+    char result[];
+    ArrayResize(result, 0);
     string resultHeaders;
-    
-    StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
-    
-    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, ArraySize(postData), result, resultHeaders);
-    
+
+    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, postSize, result, resultHeaders);
+
+    string response = CharArrayToString(result, 0, ArraySize(result), CP_UTF8);
+
     if(res != 200)
     {
-        if(res == 401 || res == 403)
-        {
-            string authMsg = "OpenRouter returned an authorization error. Verify your API key and update the OpenRouterReferer/OpenRouterAppName inputs to match your registered site or app.";
-            Print(authMsg + " (HTTP " + IntegerToString(res) + ")");
-            if(StringLen(resultHeaders) > 0)
-                Print("Response headers: " + resultHeaders);
-            Alert(authMsg);
-        }
-        else
-        {
-            Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
-        }
+        Print("OpenRouter request failed for " + modelName + ": HTTP " + IntegerToString(res) + " - " + response);
         return "ACTION:HOLD|CONFIDENCE:0.0";
     }
-    
-    string response = CharArrayToString(result);
+
+    if(StringLen(response) == 0)
+    {
+        Print("Empty response received from OpenRouter for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
     Print("Full API Response for " + modelName + ": " + response); // Debug: Log full response
     
     // Improved JSON extraction: Handle potential escapes and find content more robustly
