@@ -1,0 +1,1113 @@
+//+------------------------------------------------------------------+
+//|                                          AI_Scalper_XAUUSD.mq5 |
+//|                                  Copyright 2025, Your Name Here |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Your Name Here"
+#property link      "https://www.mql5.com"
+#property version   "3.00"
+#property strict
+#property description "AI-Assisted Scalping EA for XAUUSD or BTCUSD on M1"
+#property description "Uses OpenRouter API for multi-AI voting decisions"
+#property description "Full feature set: Multi-AI Voting, Adaptive SL/TP, Vol Gate 2.0, Dynamic Lots, Spread Control"
+#property description "Enhanced: Trailing Stop, Breakeven, Multi-TP, Dashboard Display"
+#property description "Dynamic Trend Filter: Allows trades only in current trend direction"
+#property description "Model Selection: Free or Paid models via toggle"
+#property description "AI-Driven SL/TP: Uses weighted avg/most confident from AIs for precise levels"
+
+//--- Structs
+struct AI_Decision
+{
+    string action;
+    double confidence;
+    double slPrice;     // Now absolute price, not pips
+    double tpPrice;     // Now absolute price, not pips
+};
+
+//--- Enums
+enum ENUM_AI_VOTE_MODE
+{
+    VOTE_MAJORITY,      // Majority voting
+    VOTE_UNANIMOUS,     // Unanimous decision
+    VOTE_THRESHOLD      // Custom threshold
+};
+
+enum ENUM_SLTP_MODE
+{
+    MODE_FIXED_PIPS,    // Fixed Pips
+    MODE_PERCENTAGE,    // Percentage of price
+    MODE_ATR_SWING,     // ATR-based swing
+    MODE_AI_REC         // AI Recommendation (weighted/most confident)
+};
+
+enum ENUM_LOT_MODE
+{
+    LOT_FIXED,          // Fixed Lot
+    LOT_RISK_BASED,     // Risk-Based
+    LOT_PERCENT_BALANCE // % of Balance
+};
+
+enum ENUM_VOLATILITY_LEVEL
+{
+    VOL_LOW,            // Low
+    VOL_MEDIUM,         // Medium
+    VOL_HIGH            // High
+};
+
+enum ENUM_TREND_MODE
+{
+    TREND_UP,           // Uptrend
+    TREND_DOWN,         // Downtrend
+    TREND_SIDEWAYS      // Sideways
+};
+
+enum ENUM_TRAILING_MODE
+{
+    TRAIL_PIPS,         // Fixed Pips
+    TRAIL_PERCENT,      // Percentage
+    TRAIL_OFF           // Off
+};
+
+enum ENUM_ADDITIONAL_TP
+{
+    ADD_TP_H1,          // H1 Timeframe
+    ADD_TP_H4,          // H4 Timeframe
+    ADD_TP_NONE         // None
+};
+
+enum ENUM_BREAKEVEN_MODE
+{
+    BE_OFF,             // Off
+    BE_PIPS,            // After X Pips Profit
+    BE_PERCENT          // After X% Profit
+};
+
+//--- Enum to String Functions
+string VolatilityLevelToString(ENUM_VOLATILITY_LEVEL level)
+{
+    switch(level)
+    {
+        case VOL_LOW: return "Low";
+        case VOL_MEDIUM: return "Medium";
+        case VOL_HIGH: return "High";
+        default: return "Unknown";
+    }
+}
+
+string TrendModeToString(ENUM_TREND_MODE mode)
+{
+    switch(mode)
+    {
+        case TREND_UP: return "Up";
+        case TREND_DOWN: return "Down";
+        case TREND_SIDEWAYS: return "Sideways";
+        default: return "Unknown";
+    }
+}
+
+string TrailingModeToString(ENUM_TRAILING_MODE mode)
+{
+    switch(mode)
+    {
+        case TRAIL_PIPS: return "Pips";
+        case TRAIL_PERCENT: return "Percent";
+        case TRAIL_OFF: return "Off";
+        default: return "Unknown";
+    }
+}
+
+string AdditionalTPToString(ENUM_ADDITIONAL_TP mode)
+{
+    switch(mode)
+    {
+        case ADD_TP_H1: return "H1";
+        case ADD_TP_H4: return "H4";
+        case ADD_TP_NONE: return "None";
+        default: return "Unknown";
+    }
+}
+
+string BreakevenModeToString(ENUM_BREAKEVEN_MODE mode)
+{
+    switch(mode)
+    {
+        case BE_OFF: return "Off";
+        case BE_PIPS: return "Pips";
+        case BE_PERCENT: return "Percent";
+        default: return "Unknown";
+    }
+}
+
+string OrderTypeToString(ENUM_ORDER_TYPE type)
+{
+    switch(type)
+    {
+        case ORDER_TYPE_BUY: return "BUY";
+        case ORDER_TYPE_SELL: return "SELL";
+        default: return "Unknown";
+    }
+}
+
+//--- Inputs
+input string    OpenRouterAPIKey = "";          // OpenRouter API Key
+
+// Model Selection
+input bool      UseFreeModels = true;           // Use Free Models (true) or Paid Models (false)
+input string    FreeModelNames = "moonshotai/kimi-k2:free;mistralai/mistral-small-3.2-24b-instruct:free;qwen/qwen3-coder:free;tencent/hunyuan-a13b-instruct:free;teknium/openhermes-2.5-mistral-7b:free"; // Semicolon-separated free models (up to 5)
+input string    PaidModelNames = "openchat/openchat-7b;anthropic/claude-3-sonnet;google/gemini-2.0-flash-exp;tenstorrent/ttt1b-instruct;deepseek/deepseek-r1-mistral-7b"; // Semicolon-separated paid models (up to 5)
+input int       NumAIs = 3;                     // Number of AIs to use (1-5, from selected list)
+
+input ENUM_AI_VOTE_MODE VoteMode = VOTE_MAJORITY; // Voting mode
+input double    VoteThreshold = 0.7;            // Threshold for VOTE_THRESHOLD (e.g., 70%)
+input double    MinConfidence = 0.7;            // Min confidence level (70-80%) for trade execution
+input ENUM_SLTP_MODE SLMode = MODE_AI_REC;      // Stop Loss mode (default to AI for freestyle)
+input ENUM_SLTP_MODE TPMode = MODE_AI_REC;      // Take Profit mode (default to AI for freestyle)
+input double    FixedSLPips = 10.0;             // Fixed SL in pips (fallback)
+input double    FixedTPPips = 15.0;             // Fixed TP in pips (fallback)
+input double    PercentRisk = 0.5;              // % of price for percentage mode (0.5%)
+input double    RiskPercent = 1.0;              // Risk % for risk-based lots
+input double    BalancePercent = 2.0;           // % of balance for lot sizing
+input double    ATRMultiplierSL = 1.5;          // ATR multiplier for SL swing
+input double    ATRMultiplierTP = 2.0;          // ATR multiplier for TP swing
+input double    LotSize = 0.01;                 // Fixed lot size
+input ENUM_LOT_MODE LotMode = LOT_RISK_BASED;   // Lot management mode
+input int       MaxSpreadPips = 5;              // Max allowed spread in pips
+input int       AvgSpreadPeriod = 5;            // Period for spread averaging
+input int       MagicNumber = 12345;            // Magic number for trades
+input int       ATRPeriod = 14;                 // ATR period for volatility
+input double    MinVolatility = 0.0001;         // Min ATR for trading
+input double    MaxVolatility = 0.005;          // Max ATR to avoid bursts
+input int       BBPeriod = 20;                  // Bollinger Bands period
+input double    BBDeviation = 2.0;              // Bollinger Bands deviation
+input double    BBMinWidth = 0.0005;            // Min BB width (for flat detection)
+input double    BBMaxWidth = 0.01;              // Max BB width (for extreme vol)
+input int       BarsToSend = 20;                // Number of recent bars to send to AI
+input bool      TradeOnlyOnePosition = true;    // Allow only one open position
+
+//--- New Parameters from Dashboard
+input ENUM_VOLATILITY_LEVEL VolLevel = VOL_MEDIUM; // Volatility Level Threshold
+input bool      EnableTrendFilter = true;          // Enable Dynamic Trend Filter (trade only in current trend direction)
+input int       TrendMAPeriod = 50;                // MA Period for Trend Detection
+input ENUM_TRAILING_MODE TrailingMode = TRAIL_PIPS; // Trailing Stop Mode
+input double    TrailingStart = 5.0;               // Trailing Start (pips/%)
+input double    TrailingStop = 3.0;                // Trailing Stop (pips/%)
+input double    TrailingStep = 1.0;                // Trailing Step (pips/%)
+input double    LotValue = 1.0;                    // Base Lot Multiplier
+input double    DynamicRiskPercent = 2.0;          // Dynamic Risk % Override
+input ENUM_ADDITIONAL_TP AddTPMode = ADD_TP_H1;    // Additional TP Mode
+input ENUM_BREAKEVEN_MODE BreakevenMode = BE_OFF;  // Breakeven Mode
+input double    BreakevenTrigger = 10.0;           // Breakeven Trigger (pips/%)
+input bool      ShowDashboard = true;              // Show Dashboard via Comment
+input bool      UseWeightedSLTP = true;            // Use weighted avg for SL/TP (by confidence) vs most confident
+input double    SLTPFallbackBuffer = 2.0;          // Buffer pips if AI SL/TP invalid (fallback safety)
+
+//--- Global variables
+datetime lastBarTime = 0;
+int atrHandle, bbHandle, maHandle;
+double atrBuffer[];
+string openRouterURL = "https://openrouter.ai/api/v1/chat/completions";
+double spreadHistory[100];
+int spreadIndex = 0;
+string lastAdvice = "HOLD";  // For dashboard
+double lastConfidence = 0.0; // For dashboard
+string selectedModelNames;   // Dynamically set based on UseFreeModels
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    if((_Symbol != "XAUUSD" && _Symbol != "BTCUSD") || _Period != PERIOD_M1)
+    {
+        Alert("EA is designed for XAUUSD or BTCUSD on M1 only!");
+        return(INIT_FAILED);
+    }
+    
+    if(StringLen(OpenRouterAPIKey) < 10)
+    {
+        Alert("Please enter a valid OpenRouter API key!");
+        return(INIT_FAILED);
+    }
+    
+    if(NumAIs < 1 || NumAIs > 5)
+    {
+        Alert("NumAIs must be 1-5!");
+        return(INIT_FAILED);
+    }
+    
+    // Set selected models based on toggle
+    selectedModelNames = UseFreeModels ? FreeModelNames : PaidModelNames;
+    Print("Model Selection: ", UseFreeModels ? "Free Models" : "Paid Models", " - ", selectedModelNames);
+    
+    atrHandle = iATR(_Symbol, _Period, ATRPeriod);
+    bbHandle = iBands(_Symbol, _Period, BBPeriod, 0, BBDeviation, PRICE_CLOSE);
+    maHandle = iMA(_Symbol, _Period, TrendMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    if(atrHandle == INVALID_HANDLE || bbHandle == INVALID_HANDLE || maHandle == INVALID_HANDLE)
+    {
+        Alert("Failed to create indicator handles!");
+        return(INIT_FAILED);
+    }
+    
+    ArraySetAsSeries(atrBuffer, true);
+    ArrayInitialize(spreadHistory, 0.0);
+    
+    Print("Enhanced AI Scalper EA v3.00 initialized successfully on ", _Symbol, " with ", UseFreeModels ? "Free" : "Paid", " models");
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
+    if(bbHandle != INVALID_HANDLE) IndicatorRelease(bbHandle);
+    if(maHandle != INVALID_HANDLE) IndicatorRelease(maHandle);
+    Comment(""); // Clear dashboard
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    datetime currentBarTime = iTime(_Symbol, _Period, 0);
+    if(currentBarTime == lastBarTime) 
+    {
+        ManagePositions(); // Manage open trades every tick
+        UpdateDashboard();
+        return;
+    }
+    lastBarTime = currentBarTime;
+    
+    if(TradeOnlyOnePosition && PositionsTotal() > 0) 
+    {
+        ManagePositions();
+        UpdateDashboard();
+        return;
+    }
+    
+    // Update spread history (in points)
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double currentSpreadPoints = (ask - bid) / _Point;
+    spreadHistory[spreadIndex % ArraySize(spreadHistory)] = currentSpreadPoints;
+    spreadIndex++;
+    
+    // Spread control with averaging
+    double avgSpreadPoints = CalculateAvgSpread(AvgSpreadPeriod);
+    double pipSize = (_Symbol == "XAUUSD") ? 0.1 : 0.01; // Dynamic pip size
+    bool spreadOK = (avgSpreadPoints <= MaxSpreadPips * (pipSize / _Point));
+    
+    // Get current trend
+    ENUM_TREND_MODE currentTrend = GetTrend();
+    
+    // Volatility Gate Filter 2.0
+    bool volOK = IsVolatilityOK();
+    
+    // Prepare prompt (enhanced for absolute prices)
+    string prompt = PreparePrompt();
+    
+    // Get multi-AI decisions (using selectedModelNames)
+    AI_Decision decisions[];
+    GetMultiAIDecisions(prompt, decisions, selectedModelNames);
+    
+    // Voting
+    string finalDecision = VoteDecisions(decisions);
+    
+    // Calculate avg confidence
+    int total = ArraySize(decisions);
+    double avgConf = 0.0;
+    for(int k = 0; k < total; k++) avgConf += decisions[k].confidence;
+    avgConf /= total;
+    lastAdvice = finalDecision;
+    lastConfidence = avgConf;
+    
+    string signal;
+    bool isHold = (finalDecision == "HOLD");
+    double finalSL = 0.0, finalTP = 0.0;
+    double entry = 0.0;
+    double lot = 0.0;
+    ENUM_ORDER_TYPE orderType = ORDER_TYPE_BUY; // Initialize to avoid warning
+    
+    if(!isHold)
+    {
+        bool isBuy = (finalDecision == "BUY");
+        orderType = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+        entry = isBuy ? ask : bid;
+        
+        // AI-Driven SL/TP: Weighted avg or most confident from agreeing AIs
+        int agreeCount = 0;
+        double weightedSumSL = 0.0, weightedSumTP = 0.0;
+        double sumConf = 0.0;
+        double maxConfSL = 0.0, maxConfTP = 0.0;
+        double mostConfSL = 0.0, mostConfTP = 0.0;
+        
+        for(int j = 0; j < ArraySize(decisions); j++)
+        {
+            if(decisions[j].action == finalDecision && decisions[j].confidence > 0)
+            {
+                agreeCount++;
+                // Weighted
+                weightedSumSL += decisions[j].slPrice * decisions[j].confidence;
+                weightedSumTP += decisions[j].tpPrice * decisions[j].confidence;
+                sumConf += decisions[j].confidence;
+                
+                // Most confident
+                if(decisions[j].confidence > maxConfSL)
+                {
+                    maxConfSL = decisions[j].confidence;
+                    mostConfSL = decisions[j].slPrice;
+                }
+                if(decisions[j].confidence > maxConfTP)
+                {
+                    maxConfTP = decisions[j].confidence;
+                    mostConfTP = decisions[j].tpPrice;
+                }
+            }
+        }
+        
+        if(agreeCount > 0)
+        {
+            if(UseWeightedSLTP)
+            {
+                finalSL = weightedSumSL / sumConf;
+                finalTP = weightedSumTP / sumConf;
+            }
+            else
+            {
+                finalSL = mostConfSL;
+                finalTP = mostConfTP;
+            }
+            
+            // Validate/fallback if invalid (e.g., SL > entry for buy)
+            double pipValue = pipSize;
+            if(finalSL == 0 || (isBuy && finalSL >= entry) || (!isBuy && finalSL <= entry))
+            {
+                finalSL = isBuy ? entry - FixedSLPips * pipValue : entry + FixedSLPips * pipValue;
+                Print("AI SL invalid; fallback to fixed");
+            }
+            if(finalTP == 0 || (isBuy && finalTP <= entry) || (!isBuy && finalTP >= entry))
+            {
+                finalTP = isBuy ? entry + FixedTPPips * pipValue : entry - FixedTPPips * pipValue;
+                Print("AI TP invalid; fallback to fixed");
+            }
+        }
+        else
+        {
+            // No agreeing AIs; fallback
+            double pipValue = pipSize;
+            finalSL = isBuy ? ask - FixedSLPips * pipValue : bid + FixedSLPips * pipValue;
+            finalTP = isBuy ? ask + FixedTPPips * pipValue : bid - FixedTPPips * pipValue;
+        }
+        
+        Print("Final AI SL/TP (", UseWeightedSLTP ? "Weighted" : "Most Confident", "): SL=", finalSL, " TP=", finalTP);
+        
+        // Additional TP if enabled (override if AI mode)
+        if(AddTPMode != ADD_TP_NONE && TPMode != MODE_AI_REC)
+        {
+            double addTP = CalculateAdditionalTP(isBuy);
+            finalTP = addTP;
+        }
+        
+        // Calculate lot size dynamically
+        lot = CalculateDynamicLot(finalSL);
+        lot *= LotValue; // Apply multiplier
+        
+        signal = StringFormat("Majority Vote: %s | Confidence: %.1f%% | Entry: %.5f | SL: %.5f | TP: %.5f | Lot: %.2f", finalDecision, avgConf * 100, entry, finalSL, finalTP, lot);
+    }
+    else
+    {
+        signal = StringFormat("Majority Vote: HOLD | Confidence: %.1f%%", avgConf * 100);
+    }
+    
+    // Trend filter check
+    bool trendOK = !EnableTrendFilter || ((currentTrend == TREND_UP && finalDecision == "BUY") || (currentTrend == TREND_DOWN && finalDecision == "SELL"));
+    
+    // Determine if we can trade
+    bool tradeOK = spreadOK && volOK && trendOK && !isHold;
+    
+    if(tradeOK)
+    {
+        Print("EXECUTING TRADE: ", signal);
+        OpenTrade(orderType, lot, finalSL, finalTP);
+    }
+    else
+    {
+        string prefix = isHold ? "HOLD SIGNAL: " : "REJECTED but majority vote is: ";
+        Print(prefix, signal);
+        if(!isHold)
+        {
+            string reasons = "";
+            if(!spreadOK) reasons += "High Spread; ";
+            if(!volOK) reasons += "Volatility Gate; ";
+            if(!trendOK) reasons += "Trend Filter; ";
+            if(StringLen(reasons) > 0) Print("Rejection Reasons: ", reasons);
+        }
+    }
+    
+    UpdateDashboard();
+}
+
+//+------------------------------------------------------------------+
+//| Manage open positions: Trailing, Breakeven                       |
+//+------------------------------------------------------------------+
+void ManagePositions()
+{
+    double pipSize = (_Symbol == "XAUUSD") ? 0.1 : 0.01;
+    double pipValue = pipSize;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentTP = PositionGetDouble(POSITION_TP);
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            bool isBuy = (posType == POSITION_TYPE_BUY);
+            double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            
+            // Breakeven
+            if(BreakevenMode != BE_OFF)
+            {
+                double profitPips = isBuy ? (currentPrice - openPrice) / pipValue : (openPrice - currentPrice) / pipValue;
+                double trigger = BreakevenTrigger;
+                if(BreakevenMode == BE_PERCENT) trigger = BreakevenTrigger / 100.0 * openPrice / pipValue;
+                
+                if(profitPips >= trigger && currentSL != openPrice)
+                {
+                    ModifyPosition(ticket, openPrice, currentTP);
+                    Print("Breakeven triggered for ticket ", ticket);
+                }
+            }
+            
+            // Trailing Stop
+            if(TrailingMode != TRAIL_OFF)
+            {
+                double trailStart = TrailingStart;
+                double trailStop = TrailingStop;
+                double trailStep = TrailingStep;
+                if(TrailingMode == TRAIL_PERCENT)
+                {
+                    trailStart = TrailingStart / 100.0 * openPrice / pipValue;
+                    trailStop = TrailingStop / 100.0 * openPrice / pipValue;
+                    trailStep = TrailingStep / 100.0 * openPrice / pipValue;
+                }
+                
+                double profitPips = isBuy ? (currentPrice - openPrice) / pipValue : (openPrice - currentPrice) / pipValue;
+                if(profitPips >= trailStart)
+                {
+                    double newSL = isBuy ? currentPrice - trailStop * pipValue : currentPrice + trailStop * pipValue;
+                    if((isBuy && newSL > currentSL + trailStep * pipValue) || (!isBuy && newSL < currentSL - trailStep * pipValue))
+                    {
+                        ModifyPosition(ticket, newSL, currentTP);
+                    }
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Update Dashboard via Comment                                     |
+//+------------------------------------------------------------------+
+void UpdateDashboard()
+{
+    if(!ShowDashboard) return;
+    
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double pipSize = (_Symbol == "XAUUSD") ? 0.1 : 0.01;
+    double spread = (ask - bid) / pipSize; // pips
+    ENUM_VOLATILITY_LEVEL vol = GetVolatilityLevel();
+    ENUM_TREND_MODE trend = GetTrend();
+    
+    string dash = StringFormat(
+        "HFT AI FAST GOLD SCALPER v3.0 (%s)\n" +
+        "Trend: %s\n" +
+        "Volatility: %s (%.1f pips)\n" +
+        "Spread: %.1f\n" +
+        "Max Spread: %d\n" +
+        "Advice: %s\n" +
+        "Confidence: %.0f%%\n" +
+        "Trailing Mode: %s\n" +
+        "Start: %.2f\n" +
+        "Stop: %.2f\n" +
+        "Step: %.2f\n" +
+        "Lot Value: %.1f DYNAMIC\n" +
+        "Dynamic Risk: %.1f%%\n" +
+        "Add TP: %s\n" +
+        "Breakeven: %s\n" +
+        "Models: %s",
+        _Symbol, TrendModeToString(trend), VolatilityLevelToString(vol), atrBuffer[0] / pipSize, spread, MaxSpreadPips,
+        lastAdvice, lastConfidence * 100, TrailingModeToString(TrailingMode),
+        TrailingStart, TrailingStop, TrailingStep, LotValue,
+        DynamicRiskPercent, AdditionalTPToString(AddTPMode), BreakevenModeToString(BreakevenMode),
+        UseFreeModels ? "FREE" : "PAID"
+    );
+    Comment(dash);
+}
+
+//+------------------------------------------------------------------+
+//| Get current trend from MA                                        |
+//+------------------------------------------------------------------+
+ENUM_TREND_MODE GetTrend()
+{
+    double maBuffer[];
+    ArraySetAsSeries(maBuffer, true);
+    if(CopyBuffer(maHandle, 0, 0, 2, maBuffer) != 2) return TREND_SIDEWAYS;
+    double close = iClose(_Symbol, _Period, 0);
+    if(close > maBuffer[0] && maBuffer[0] > maBuffer[1]) return TREND_UP;
+    if(close < maBuffer[0] && maBuffer[0] < maBuffer[1]) return TREND_DOWN;
+    return TREND_SIDEWAYS;
+}
+
+//+------------------------------------------------------------------+
+//| Get volatility level                                             |
+//+------------------------------------------------------------------+
+ENUM_VOLATILITY_LEVEL GetVolatilityLevel()
+{
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) != 1) return VOL_MEDIUM;
+    double pipSize = (_Symbol == "XAUUSD") ? 0.1 : 0.01;
+    double atrPips = atrBuffer[0] / pipSize;
+    if(atrPips < 5.0) return VOL_LOW;
+    if(atrPips < 15.0) return VOL_MEDIUM;
+    return VOL_HIGH;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate additional TP (e.g., H1 close)                         |
+//+------------------------------------------------------------------+
+double CalculateAdditionalTP(bool isBuy)
+{
+    ENUM_TIMEFRAMES tf = (AddTPMode == ADD_TP_H1) ? PERIOD_H1 : PERIOD_H4;
+    double tfClose = iClose(_Symbol, tf, 0);
+    double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double direction = isBuy ? 1.0 : -1.0;
+    return currentPrice + direction * (tfClose - currentPrice) * 1.5; // Simple extension; tune as needed
+}
+
+//+------------------------------------------------------------------+
+//| Modify position SL/TP                                            |
+//+------------------------------------------------------------------+
+void ModifyPosition(ulong ticket, double newSL, double newTP)
+{
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_SLTP;
+    request.position = ticket;
+    request.symbol = _Symbol;
+    request.sl = newSL;
+    request.tp = newTP;
+    
+    if(!OrderSend(request, result))
+        Print("Modify failed: ", result.retcode);
+    else
+        Print("Position modified: SL=", newSL, " TP=", newTP);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate average spread (points)                                |
+//+------------------------------------------------------------------+
+double CalculateAvgSpread(int period)
+{
+    int effectiveCount = MathMin(period, spreadIndex);
+    if(effectiveCount == 0) return 0.0;
+    
+    double sum = 0.0;
+    for(int k = 0; k < effectiveCount; k++)
+    {
+        int idx = (spreadIndex - 1 - k) % ArraySize(spreadHistory);
+        sum += spreadHistory[idx];
+    }
+    
+    return sum / effectiveCount;
+}
+
+//+------------------------------------------------------------------+
+//| Volatility Gate Filter 2.0: ATR + BB (no print)                  |
+//+------------------------------------------------------------------+
+bool IsVolatilityOK()
+{
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) != 1) return false;
+    double currentATR = atrBuffer[0];
+    if(currentATR < MinVolatility || currentATR > MaxVolatility) return false;
+    
+    double bbUpper[], bbLower[], bbMiddle[];
+    ArraySetAsSeries(bbUpper, true); ArraySetAsSeries(bbLower, true); ArraySetAsSeries(bbMiddle, true);
+    if(CopyBuffer(bbHandle, 1, 0, 1, bbUpper) != 1 || CopyBuffer(bbHandle, 2, 0, 1, bbLower) != 1 || CopyBuffer(bbHandle, 0, 0, 1, bbMiddle) != 1)
+        return false;
+    
+    double bbWidth = (bbUpper[0] - bbLower[0]);
+    if(bbWidth < BBMinWidth || bbWidth > BBMaxWidth) 
+    {
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Prepare prompt for AI (enhanced for absolute prices)             |
+//+------------------------------------------------------------------+
+string PreparePrompt()
+{
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double pipSize = (_Symbol == "XAUUSD") ? 0.1 : 0.01;
+    double spreadPips = (ask - bid) / pipSize;
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) != 1) return "Error fetching ATR";
+    double atrPips = atrBuffer[0] / pipSize;
+    
+    string prompt = "You are a high-frequency scalping AI for " + _Symbol + " on 1-minute. ";
+    prompt += "Goal: Low drawdown, quick trades. Provide BUY/SELL/HOLD with confidence (0-1). ";
+    prompt += "For BUY/SELL, give ABSOLUTE SL and TP prices (e.g., SL=353.80 TP=355.30, not pips). ";
+    prompt += "Current spread: " + DoubleToString(spreadPips, 1) + " pips. ";
+    prompt += "ATR: " + DoubleToString(atrPips, 1) + " pips. ";
+    prompt += "Current Bid: " + DoubleToString(bid, 5) + " Ask: " + DoubleToString(ask, 5) + ". ";
+    prompt += "Recent " + IntegerToString(BarsToSend) + " bars (OHLC in USD, newest first):\n";
+    
+    double open[], high[], low[], close[];
+    ArraySetAsSeries(open, true); ArraySetAsSeries(high, true); ArraySetAsSeries(low, true); ArraySetAsSeries(close, true);
+    
+    if(CopyOpen(_Symbol, _Period, 0, BarsToSend, open) != BarsToSend ||
+       CopyHigh(_Symbol, _Period, 0, BarsToSend, high) != BarsToSend ||
+       CopyLow(_Symbol, _Period, 0, BarsToSend, low) != BarsToSend ||
+       CopyClose(_Symbol, _Period, 0, BarsToSend, close) != BarsToSend)
+        return "Error fetching data";
+    
+    for(int i = 0; i < BarsToSend; i++)
+    {
+        prompt += StringFormat("Bar %d: O=%.5f H=%.5f L=%.5f C=%.5f\n", i+1, open[i], high[i], low[i], close[i]);
+    }
+    
+    prompt += "Respond ONLY with this exact format, no extra text: ACTION:BUY|CONFIDENCE:0.XX|SL:XXX.XXXX|TP:XXX.XXXX or ACTION:HOLD|CONFIDENCE:0.XX (omit SL/TP for HOLD). Use absolute prices.";
+    
+    return prompt;
+}
+
+//+------------------------------------------------------------------+
+//| Get decisions from multiple AIs (updated to use selected models) |
+//+------------------------------------------------------------------+
+void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelList)
+{
+    ArrayResize(decisions, NumAIs);
+    
+    for(int i = 0; i < NumAIs; i++)
+    {
+        decisions[i].action = "HOLD";
+        decisions[i].confidence = 0.0;
+        decisions[i].slPrice = 0.0;
+        decisions[i].tpPrice = 0.0;
+    }
+    
+    string models[];
+    int numModels = StringSplit(modelList, ';', models);
+    numModels = MathMin(numModels, NumAIs);
+    
+    for(int i = 0; i < numModels; i++)
+    {
+        string model = models[i];
+        StringTrimLeft(model);
+        StringTrimRight(model);
+        string decisionStr = GetAIDecision(prompt, model);
+        ParseAIDecision(decisionStr, decisions[i]);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Single AI decision                                               |
+//+------------------------------------------------------------------+
+string GetAIDecision(string prompt, string modelName)
+{
+    string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
+    string requestBody = "{"
+                        "\"model\": \"" + modelName + "\","
+                        "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
+                        "\"max_tokens\": 100,"
+                        "\"temperature\": 0.1"
+                        "}";
+    
+    char postData[], result[];
+    string resultHeaders;
+    
+    StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+    
+    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, ArraySize(postData), result, resultHeaders);
+    
+    if(res != 200)
+    {
+        Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+    
+    string response = CharArrayToString(result);
+    Print("Full API Response for " + modelName + ": " + response); // Debug: Log full response
+    
+    // Improved JSON extraction: Handle potential escapes and find content more robustly
+    int contentStart = StringFind(response, "\"content\":");
+    if(contentStart == -1) 
+    {
+        Print("No 'content' field found in response for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+    
+    // Skip to after ":"
+    contentStart = StringFind(response, "\"", contentStart + 9); // After "content":
+    if(contentStart == -1) 
+    {
+        Print("'content' value start not found for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+    contentStart++; // Skip the opening "
+    
+    // Find closing " , handling simple escapes (replace \" with temp marker if needed)
+    // For simplicity, find the next unescaped "
+    int contentEnd = contentStart;
+    while(true)
+    {
+        int nextQuote = StringFind(response, "\"", contentEnd);
+        if(nextQuote == -1) break;
+        
+        // Count backslashes before quote
+        int backslashCount = 0;
+        for(int j = nextQuote - 1; j >= contentStart && StringGetCharacter(response, j) == 92; j--)
+            backslashCount++;
+        
+        if(backslashCount % 2 == 0) // Even escapes = closing quote
+        {
+            contentEnd = nextQuote;
+            break;
+        }
+        else
+        {
+            contentEnd = nextQuote + 1;
+        }
+    }
+    
+    if(contentEnd <= contentStart)
+    {
+        Print("No closing quote for content in response for " + modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+    
+    string aiResponse = StringSubstr(response, contentStart, contentEnd - contentStart);
+    // Unescape common: replace \n with actual newline if needed, but for parsing, keep as is
+    StringReplace(aiResponse, "\\n", "\n"); // Handle newlines if any
+    StringReplace(aiResponse, "\\r", "");   // Clean
+    StringTrimLeft(aiResponse);
+    StringTrimRight(aiResponse);
+    
+    Print("Extracted AI Response for " + modelName + ": " + aiResponse); // Debug: Log extracted response
+    
+    return aiResponse;
+}
+
+//+------------------------------------------------------------------+
+//| Parse AI decision string (robust parsing starting from keywords) |
+//+------------------------------------------------------------------+
+void ParseAIDecision(string decStr, AI_Decision &dec)
+{
+    dec.action = "HOLD";
+    dec.confidence = 0.0;
+    dec.slPrice = 0.0;
+    dec.tpPrice = 0.0;
+    
+    Print("Parsing raw decision string: " + decStr); // Debug: Log input to parser
+    
+    // Robust parsing: Find "ACTION:" and parse from there, ignoring prefix junk
+    int actionPos = StringFind(decStr, "ACTION:");
+    if(actionPos == -1) 
+    {
+        Print("No 'ACTION:' found in response");
+        return;
+    }
+    
+    // Extract action after "ACTION:"
+    int pipePos = StringFind(decStr, "|", actionPos);
+    if(pipePos == -1) pipePos = StringLen(decStr);
+    string actionPart = StringSubstr(decStr, actionPos + 7, pipePos - actionPos - 7);
+    StringTrimLeft(actionPart);
+    StringTrimRight(actionPart);
+    StringToUpper(actionPart); // Normalize case
+    if(StringFind(actionPart, "BUY") >= 0) dec.action = "BUY";
+    else if(StringFind(actionPart, "SELL") >= 0) dec.action = "SELL";
+    else if(StringFind(actionPart, "HOLD") >= 0) dec.action = "HOLD";
+    
+    // CONFIDENCE: after first |
+    int confPos = StringFind(decStr, "CONFIDENCE:", pipePos);
+    if(confPos != -1)
+    {
+        int nextPipe = StringFind(decStr, "|", confPos);
+        if(nextPipe == -1) nextPipe = StringLen(decStr);
+        string confPart = StringSubstr(decStr, confPos + 10, nextPipe - confPos - 10);
+        StringTrimLeft(confPart);
+        StringTrimRight(confPart);
+        // Extract number after possible :
+        int colonPos = StringFind(confPart, ":");
+        if(colonPos >= 0) confPart = StringSubstr(confPart, colonPos + 1);
+        dec.confidence = MathMax(0.0, MathMin(1.0, StringToDouble(confPart))); // Clamp 0-1
+    }
+    
+// If BUY/SELL, parse SL and TP robustly
+if(dec.action != "HOLD" && dec.confidence > 0)
+{
+    // --- Parse Stop Loss (SL:)
+    int slPos = StringFind(decStr, "SL:");
+    if(slPos != -1)
+    {
+        // Extract substring after "SL:"
+        string slPart = StringSubstr(decStr, slPos + 3);
+        // Trim everything after next pipe '|' if exists
+        int pipeAfterSL = StringFind(slPart, "|");
+        if(pipeAfterSL != -1)
+            slPart = StringSubstr(slPart, 0, pipeAfterSL);
+
+        StringTrimLeft(slPart);
+        StringTrimRight(slPart);
+
+        // Remove any "SL:" prefix remnants or non-numeric chars
+        int colonPos = StringFind(slPart, ":");
+        if(colonPos >= 0)
+            slPart = StringSubstr(slPart, colonPos + 1);
+
+        // Keep only numeric + dot + minus
+        for(int c = 0; c < StringLen(slPart); c++)
+        {
+            int ch = StringGetCharacter(slPart, c);
+            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
+                StringSetCharacter(slPart, c, ' ');
+        }
+        StringTrimLeft(slPart);
+        StringTrimRight(slPart);
+
+        dec.slPrice = StringToDouble(slPart);
+    }
+
+    // --- Parse Take Profit (TP:)
+    int tpPos = StringFind(decStr, "TP:");
+    if(tpPos != -1)
+    {
+        string tpPart = StringSubstr(decStr, tpPos + 3);
+        int pipeAfterTP = StringFind(tpPart, "|");
+        if(pipeAfterTP != -1)
+            tpPart = StringSubstr(tpPart, 0, pipeAfterTP);
+
+        StringTrimLeft(tpPart);
+        StringTrimRight(tpPart);
+
+        int colonPos = StringFind(tpPart, ":");
+        if(colonPos >= 0)
+            tpPart = StringSubstr(tpPart, colonPos + 1);
+
+        // Clean numeric characters
+        for(int c = 0; c < StringLen(tpPart); c++)
+        {
+            int ch = StringGetCharacter(tpPart, c);
+            if(!( (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ))
+                StringSetCharacter(tpPart, c, ' ');
+        }
+        StringTrimLeft(tpPart);
+        StringTrimRight(tpPart);
+
+        dec.tpPrice = StringToDouble(tpPart);
+    }
+
+    // --- Log parsed results
+    PrintFormat("Parsed AI SL/TP → SL: %.5f | TP: %.5f", dec.slPrice, dec.tpPrice);
+}
+
+    
+    Print("Parsed result - Action: ", dec.action, " | Confidence: ", DoubleToString(dec.confidence, 2), 
+          " | SL: ", DoubleToString(dec.slPrice, 5), " | TP: ", DoubleToString(dec.tpPrice, 5)); // Debug: Log parsed values
+}
+
+//+------------------------------------------------------------------+
+//| Voting logic                                                     |
+//+------------------------------------------------------------------+
+string VoteDecisions(AI_Decision &decisions[])
+{
+    int total = ArraySize(decisions);
+    if(total == 0) return "HOLD";
+    
+    int buyCount = 0, sellCount = 0;
+    double avgConf = 0.0;
+    
+    for(int i = 0; i < total; i++)
+    {
+        if(decisions[i].action == "BUY") buyCount++;
+        else if(decisions[i].action == "SELL") sellCount++;
+        avgConf += decisions[i].confidence;
+    }
+    avgConf /= total;
+    
+    Print("AI Votes - Buy: ", buyCount, " Sell: ", sellCount, " Avg Conf: ", DoubleToString(avgConf * 100, 1), "%");
+    Print("Minimum required confidence: ", DoubleToString(MinConfidence * 100, 0), "%");
+    if(avgConf < MinConfidence) 
+    {
+        Print("Avg Confidence: ", DoubleToString(avgConf * 100, 1), "% < ", DoubleToString(MinConfidence * 100, 0), "%, forcing HOLD");
+        return "HOLD";
+    }
+    
+    double buyPct = (double)buyCount / total;
+    double sellPct = (double)sellCount / total;
+    
+    switch(VoteMode)
+    {
+        case VOTE_MAJORITY:
+            if(buyPct > sellPct && buyPct > 0.5) return "BUY";
+            if(sellPct > buyPct && sellPct > 0.5) return "SELL";
+            break;
+        case VOTE_UNANIMOUS:
+            if(buyCount == total) return "BUY";
+            if(sellCount == total) return "SELL";
+            break;
+        case VOTE_THRESHOLD:
+            if(buyPct >= VoteThreshold) return "BUY";
+            if(sellPct >= VoteThreshold) return "SELL";
+            break;
+    }
+    
+    Print("No clear majority/unanimous/threshold met, HOLD");
+    return "HOLD";
+}
+
+//+------------------------------------------------------------------+
+//| Calculate adaptive SL/TP (updated for AI absolute prices)        |
+//+------------------------------------------------------------------+
+void CalculateAdaptiveSLTP(bool isBuy, double &sl, double &tp, double aiSL, double aiTP)
+{
+    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double pipValue = _Point * 10;
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) != 1) atrBuffer[0] = 0.001;
+    double atrVal = atrBuffer[0];
+    
+    // For AI_REC, use provided aiSL/aiTP directly (already absolute)
+    if(SLMode == MODE_AI_REC)
+    {
+        sl = aiSL;
+    }
+    else
+    {
+        switch(SLMode)
+        {
+            case MODE_FIXED_PIPS:
+                sl = isBuy ? price - FixedSLPips * pipValue : price + FixedSLPips * pipValue;
+                break;
+            case MODE_PERCENTAGE:
+                {
+                    double percent = PercentRisk / 100.0;
+                    double slDistance = price * percent;
+                    sl = isBuy ? price - slDistance : price + slDistance;
+                }
+                break;
+            case MODE_ATR_SWING:
+                sl = isBuy ? price - ATRMultiplierSL * atrVal : price + ATRMultiplierSL * atrVal;
+                break;
+            default:
+                sl = isBuy ? price - FixedSLPips * pipValue : price + FixedSLPips * pipValue;
+                break;
+        }
+    }
+    
+    if(TPMode == MODE_AI_REC)
+    {
+        tp = aiTP;
+    }
+    else
+    {
+        switch(TPMode)
+        {
+            case MODE_FIXED_PIPS:
+                tp = isBuy ? price + FixedTPPips * pipValue : price - FixedTPPips * pipValue;
+                break;
+            case MODE_PERCENTAGE:
+                {
+                    double percent = PercentRisk / 100.0 * 1.5;
+                    double tpDistance = price * percent;
+                    tp = isBuy ? price + tpDistance : price - tpDistance;
+                }
+                break;
+            case MODE_ATR_SWING:
+                tp = isBuy ? price + ATRMultiplierTP * atrVal : price - ATRMultiplierTP * atrVal;
+                break;
+            default:
+                tp = isBuy ? price + FixedTPPips * pipValue : price - FixedTPPips * pipValue;
+                break;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate dynamic lot                                            |
+//+------------------------------------------------------------------+
+double CalculateDynamicLot(double slPrice)
+{
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double slDistancePoints = MathAbs(price - slPrice) / _Point;
+    double riskPct = RiskPercent;
+    if(DynamicRiskPercent > 0) riskPct = DynamicRiskPercent;
+    
+    switch(LotMode)
+    {
+        case LOT_FIXED:
+            return LotSize;
+        case LOT_RISK_BASED:
+            {
+                double riskAmount = balance * (riskPct / 100.0);
+                if(slDistancePoints == 0 || tickValue == 0) return 0.0;
+                double lot = riskAmount / (slDistancePoints * tickValue);
+                double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+                double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+                double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+                lot = MathMax(minLot, MathMin(maxLot, NormalizeDouble(lot / stepLot, 0) * stepLot));
+                return lot;
+            }
+        case LOT_PERCENT_BALANCE:
+            {
+                double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                if(contractSize == 0 || price == 0) return 0.0;
+                double exposure = balance * (BalancePercent / 100.0);
+                double lot = exposure / (contractSize * price);
+                double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+                double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+                double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+                lot = MathMax(minLot, MathMin(maxLot, NormalizeDouble(lot / stepLot, 0) * stepLot));
+                return lot;
+            }
+        default:
+            return LotSize;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Open trade                                                       |
+//+------------------------------------------------------------------+
+void OpenTrade(ENUM_ORDER_TYPE orderType, double lot, double sl, double tp)
+{
+    double price = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lot;
+    request.type = orderType;
+    request.price = price;
+    request.sl = sl;
+    request.tp = tp;
+    request.magic = MagicNumber;
+    request.deviation = 3;
+    request.type_filling = ORDER_FILLING_IOC;
+    
+    if(!OrderSend(request, result))
+        Print("Trade failed: ", result.retcode, " - ", result.comment);
+    else
+        Print("Trade opened: ", OrderTypeToString(orderType), " lot=", lot, " SL=", sl, " TP=", tp);
+}
