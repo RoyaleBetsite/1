@@ -206,6 +206,7 @@ datetime lastBarTime = 0;
 int atrHandle, bbHandle, maHandle;
 double atrBuffer[];
 string openRouterURL = "https://openrouter.ai/api/v1/chat/completions";
+string sanitizedApiKey = "";
 double spreadHistory[100];
 int spreadIndex = 0;
 string lastAdvice = "HOLD";  // For dashboard
@@ -223,7 +224,11 @@ int OnInit()
         return(INIT_FAILED);
     }
     
-    if(StringLen(OpenRouterAPIKey) < 10)
+    sanitizedApiKey = OpenRouterAPIKey;
+    StringTrimLeft(sanitizedApiKey);
+    StringTrimRight(sanitizedApiKey);
+
+    if(StringLen(sanitizedApiKey) < 10)
     {
         Alert("Please enter a valid OpenRouter API key!");
         return(INIT_FAILED);
@@ -723,7 +728,17 @@ void GetMultiAIDecisions(string prompt, AI_Decision &decisions[], string modelLi
 //+------------------------------------------------------------------+
 string GetAIDecision(string prompt, string modelName)
 {
-    string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + OpenRouterAPIKey + "\r\n";
+    if(StringLen(sanitizedApiKey) < 10)
+    {
+        Print("OpenRouter API key missing or invalid. Skipping request for ", modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    string headers =
+        "Content-Type: application/json\r\n"
+        + "Accept: application/json\r\n"
+        + "Authorization: Bearer " + sanitizedApiKey + "\r\n"
+        + "X-Title: MQL5-Scalper\r\n";
     string requestBody = "{"
                         "\"model\": \"" + modelName + "\","
                         "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}],"
@@ -734,10 +749,17 @@ string GetAIDecision(string prompt, string modelName)
     char postData[], result[];
     string resultHeaders;
     
-    StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
-    
-    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, ArraySize(postData), result, resultHeaders);
-    
+    int bodyLen = StringToCharArray(requestBody, postData, 0, WHOLE_ARRAY, CP_UTF8);
+    if(bodyLen <= 1)
+    {
+        Print("Failed to encode request body for ", modelName);
+        return "ACTION:HOLD|CONFIDENCE:0.0";
+    }
+
+    int requestLen = bodyLen - 1; // Exclude terminating null byte
+
+    int res = WebRequest("POST", openRouterURL, headers, NULL, 10000, postData, requestLen, result, resultHeaders);
+
     if(res != 200)
     {
         Print("API call failed for " + modelName + ": HTTP " + IntegerToString(res) + " | Headers: " + resultHeaders);
